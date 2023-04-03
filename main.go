@@ -5,9 +5,33 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/turnage/graw/reddit"
 )
+
+func chunksBy[T any](items []T, chunk_size int) (chunks [][]T) {
+	for chunk_size < len(items) {
+		items, chunks = items[chunk_size:], append(chunks, items[0:chunk_size:chunk_size])
+	}
+	return append(chunks, items)
+}
+
+func getMoreComments(bot reddit.Bot, postID string, moreChildren []string) (replies []*reddit.Comment) {
+	for _, more := range chunksBy(moreChildren, 100) {
+		morechildren := map[string]string{
+			"link_id":  "t3_" + postID,
+			"children": strings.Join(more, ","),
+		}
+		harvest, err := bot.ListingWithParams("/api/morechildren.json", morechildren)
+		if err != nil {
+			panic(err)
+		}
+		replies = append(replies, harvest.Comments...)
+	}
+
+	return
+}
 
 func getAllComments(bot reddit.Bot, post *reddit.Post) {
 	var queue []*reddit.Comment
@@ -17,21 +41,13 @@ func getAllComments(bot reddit.Bot, post *reddit.Post) {
 		r := queue[0]
 		queue = queue[1:]
 		if r.More != nil {
-			morechildren := map[string]string{
-				"link_id":  "t3_" + post.ID,
-				"children": r.More.Children[0],
-			}
-			harvest, err := bot.ListingWithParams("/api/morechildren.json", morechildren)
-			if err != nil {
-				panic(err)
-			}
-			r.Replies = append(r.Replies, harvest.Comments...)
+			r.Replies = append(r.Replies, getMoreComments(bot, post.ID, r.More.Children)...)
 		}
 		queue = append(queue, r.Replies...)
 	}
 }
 
-func writeComments(bot reddit.Bot, permalink string) {
+func threadToJson(bot reddit.Bot, permalink string) {
 	fmt.Println(permalink)
 	post, _ := bot.Thread(permalink)
 	getAllComments(bot, post)
@@ -69,7 +85,7 @@ func main() {
 	for _, post := range harvest.Posts {
 		match := re.FindSubmatch([]byte(post.Title))
 		if len(match) > 0 {
-			writeComments(bot, post.Permalink)
+			threadToJson(bot, post.Permalink)
 			fmt.Println(string(match[1]), string(match[2]))
 			fmt.Printf("[%s] posted [%s] [%s]\n", post.Author, post.Title, post.URL)
 			break
