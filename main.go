@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Marcel-ICMC/graw/reddit"
 )
@@ -28,8 +29,6 @@ func getMoreComments(bot reddit.Bot, postID string, moreChildren []string) (repl
 
 	chn := make(chan reddit.Harvest, 70)
 
-	Logger.Printf("Len(moreChildren) = %d\n", len(moreChildren))
-
 	for _, more := range chunksBy(moreChildren, 100) {
 		go func(more []string) {
 			harvest, err := bot.ListingWithParams(
@@ -40,6 +39,7 @@ func getMoreComments(bot reddit.Bot, postID string, moreChildren []string) (repl
 				},
 			)
 			if err != nil {
+				Logger.Println("Failed while fetching more comments: ", err)
 				panic(err)
 			}
 			chn <- harvest
@@ -62,7 +62,6 @@ func getMoreComments(bot reddit.Bot, postID string, moreChildren []string) (repl
 	}
 
 	replies = append(replies, queue...)
-	Logger.Println("Solving more comments tree")
 	// solving comment tree
 	for len(queue) != 0 {
 		comment := queue[0]
@@ -72,7 +71,6 @@ func getMoreComments(bot reddit.Bot, postID string, moreChildren []string) (repl
 		queue = append(queue, reply_tree[comment]...)
 	}
 
-	Logger.Println("Solved comment tree")
 	return
 }
 
@@ -80,25 +78,27 @@ func getAllComments(bot reddit.Bot, post *reddit.Post) {
 	var queue []*reddit.Comment
 	queue = append(queue, post.Replies...)
 
+	requests := 0
 	for len(queue) != 0 {
-		Logger.Printf("Len(queue) = %d\n", len(queue))
 		r := queue[0]
 		queue = queue[1:]
 		if r.More != nil {
-			Logger.Println("Getting more comments")
+			requests += (len(r.More.Children) / 100) + 1
 			r.Replies = append(r.Replies, getMoreComments(bot, post.ID, r.More.Children)...)
 		}
 		queue = append(queue, r.Replies...)
 	}
+
+	Logger.Printf("Needed %d more comments requests", requests)
 }
 
 func threadToJson(bot reddit.Bot, permalink string) ([]byte, error) {
 	Logger.Println(permalink)
 	post, _ := bot.Thread(permalink)
 	getAllComments(bot, post)
-	thread_json, error := json.Marshal(post)
+	thread_json, err := json.Marshal(post)
 
-	return thread_json, error
+	return thread_json, err
 }
 
 func jsonToFile(thread_json []byte, file_path string) error {
@@ -111,14 +111,25 @@ func jsonToFile(thread_json []byte, file_path string) error {
 
 	nbytes, err := f.Write(thread_json)
 	if err != nil {
-		return err
+		Logger.Println("Failed to write to file ", file_path, ": ", err)
+		panic(err)
 	}
-	Logger.Printf("wrote %d bytes\n", nbytes)
+	Logger.Printf("wrote %d bytes to %s", nbytes, file_path)
 	return nil
 }
 
 func main() {
-	Logger = log.New(os.Stderr, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
+	f, err := os.OpenFile(
+		fmt.Sprintf("logs/%s.txt", time.Now().Format(time.DateTime)),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0644,
+	)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+	defer f.Close()
+
+	Logger = log.New(f, "", log.Ldate|log.Lmicroseconds|log.Lshortfile)
 	bot, err := reddit.NewBotFromAgentFile("lurker-bot.agent", 0)
 	if err != nil {
 		Logger.Println("Failed to create bot handle: ", err)
@@ -136,14 +147,21 @@ func main() {
 
 		re := regexp.MustCompile("(.+) - Episode (\\d+) discussion")
 		for _, post := range harvest.Posts {
+			after = "t1_" + post.ID
 			match := re.FindSubmatch([]byte(post.Title))
 			if len(match) > 0 {
-				after = "t1_" + post.ID
+				write_path := fmt.Sprintf("%s %s.json", match[1], match[2])
+				write_path = strings.ReplaceAll(write_path, "/", "-")
+				write_path = "threads/" + write_path
+				if _, err := os.Stat(write_path); err == nil {
+					Logger.Printf("File %s already exists", write_path)
+					continue
+				}
+
 				Logger.Printf("[%s] posted [%s] [%s]\n", post.Author, post.Title, post.URL)
-				Logger.Println(string(match[1]), string(match[2]))
 
 				thread_json, _ := threadToJson(bot, post.Permalink)
-				jsonToFile(thread_json, fmt.Sprintf("threads/%s%s.json", match[1], match[2]))
+				jsonToFile(thread_json, write_path)
 			}
 		}
 	}
