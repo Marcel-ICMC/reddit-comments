@@ -1,4 +1,10 @@
 useful_commands.sh
 lurker-bot.agent
+lurker-bot.json
 threads/
 .vscode
+comments*.txt
+submissions*.txt
+*.json
+*.ipynb
+threads/*
